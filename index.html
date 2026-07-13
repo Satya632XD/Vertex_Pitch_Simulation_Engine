@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vertex 3D Pitch Simulation</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; }
+        #ui-overlay {
+            position: absolute; top: 20px; left: 20px; color: white;
+            background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px;
+            pointer-events: none; border: 1px solid #333;
+        }
+        h1 { margin: 0 0 5px 0; font-size: 18px; color: #00ff88; text-transform: uppercase; letter-spacing: 1px; }
+        p { margin: 0; font-size: 12px; color: #aaa; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="ui-overlay">
+        <h1>Vertex 3D Engine v1.0</h1>
+        <p>Simulation Rate: 60Hz AUTHORITATIVE</p>
+        <p>Render Pipeline: WebGL Native</p>
+        <p>Status: Active Real-time Physics Tick</p>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <script>
+        // --- 1. SETUP THE 3D GRAPHICS WORLD ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a0f1d);
+        scene.fog = new THREE.FogExp2(0x0a0f1d, 0.015);
+
+        // Camera setup (Field of View, Aspect Ratio, Near/Far clipping planes)
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 35, 55);
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        container.appendChild(renderer.domElement);
+
+        // --- 2. LIGHTING (Stadium Floodlights) ---
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+        scene.add(ambientLight);
+
+        const floodlight = new THREE.DirectionalLight(0xffffff, 0.8);
+        floodlight.position.set(20, 50, 20);
+        floodlight.castShadow = true;
+        floodlight.shadow.mapSize.width = 2048;
+        floodlight.shadow.mapSize.height = 2048;
+        floodlight.shadow.camera.near = 0.5;
+        floodlight.shadow.camera.far = 150;
+        const d = 40;
+        floodlight.shadow.camera.left = -d;
+        floodlight.shadow.camera.right = d;
+        floodlight.shadow.camera.top = d;
+        floodlight.shadow.camera.bottom = -d;
+        scene.add(floodlight);
+
+        // --- 3. CREATING 3D OBJECTS (The Pitch & The Ball) ---
+        
+        // The Green Grass Plane Geometry
+        const pitchWidth = 70;
+        const pitchLength = 100;
+        const pitchGeometry = new THREE.PlaneGeometry(pitchWidth, pitchLength);
+        const pitchMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0x1b4d22, 
+            roughness: 0.8, 
+            metalness: 0.1 
+        });
+        const pitch = new THREE.Mesh(pitchGeometry, pitchMaterial);
+        pitch.rotation.x = -Math.PI / 2; // Lay flat on ground
+        pitch.receiveShadow = true;
+        scene.add(pitch);
+
+        // Visual Markings: Penalty Box Outlines
+        const lineMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+        
+        const centerLineGeo = new THREE.PlaneGeometry(pitchWidth, 0.4);
+        const centerLine = new THREE.Mesh(centerLineGeo, lineMaterial);
+        centerLine.rotation.x = -Math.PI / 2;
+        centerLine.position.y = 0.01; // Raise slightly above grass to prevent texture glitching
+        scene.add(centerLine);
+
+        const centerCircleGeo = new THREE.RingGeometry(9.15, 9.35, 64);
+        const centerCircle = new THREE.Mesh(centerCircleGeo, lineMaterial);
+        centerCircle.rotation.x = -Math.PI / 2;
+        centerCircle.position.set(0, 0.01, 0);
+        scene.add(centerCircle);
+
+        // The Football Sphere Geometry
+        const ballRadius = 0.8;
+        const ballGeometry = new THREE.SphereGeometry(ballRadius, 32, 32);
+        
+        // Give the sphere a wireframe pattern overlay so you can visually see it spin in 3D
+        const ballMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0xffffff, 
+            roughness: 0.4,
+            wireframe: false
+        });
+        const ball = new THREE.Mesh(ballGeometry, ballMaterial);
+        ball.castShadow = true;
+        scene.add(ball);
+
+        // Add a wireframe helper directly onto the ball to make the rotational spin clear
+        const wireframeGeo = new THREE.SphereGeometry(ballRadius + 0.01, 8, 8);
+        const wireframeMat = new THREE.MeshBasicMaterial({ color: 0x111111, wireframe: true, transparent: true, opacity: 0.3 });
+        const ballLines = new THREE.Mesh(wireframeGeo, wireframeMat);
+        ball.add(ballLines);
+
+        // --- 4. ENGINE CORE KINEMATICS & PHYSICS VARIABLES ---
+        let ballX = 0, ballY = 15, ballZ = 0; // Coordinates matching our physics models
+        let velX = 0.4, velY = 0, velZ = 0;
+        let spinX = 0.05, spinY = 0.1, spinZ = 0.02;
+
+        const gravity = -9.81;
+        const pitchRestitution = 0.75; // Bounce bounce multiplier
+        const pitchFriction = 0.02;    // Rolling drag resistance
+        const clock = new THREE.Clock();
+
+        // --- 5. THE REAL-TIME 3D RUNTIME RENDERING LOOP ---
+        function stepSimulationFrame() {
+            requestAnimationFrame(stepSimulationFrame);
+
+            // Cap tracking calculation frame deltas safely
+            let dt = clock.getDelta();
+            if (dt > 0.1) dt = 0.1; 
+
+            // Execute Kinematic Vector Acceleration Math
+            velZ += gravity * dt; // Apply gravity downward along Z-axis (mapped to 3D Up/Down height)
+
+            ballX += velX;
+            ballY += velZ; // In Three.js, up/down height is calculated via Y axis matrix
+            ballZ += velX * 0.2; // Add slight curved cross-field flight drift
+
+            // Floor Plane Collision Checking
+            if (ballY <= ballRadius) {
+                ballY = ballRadius;
+                velZ = -velZ * pitchRestitution; // Invert physics vector for kinetic rebound
+                
+                // Apply drag friction values to horizontal vectors on contact
+                velX *= (1.0f - pitchFriction);
+                
+                // Generate automated random force kicks if velocity decays completely
+                if (Math.abs(velZ) < 0.2 && Math.abs(velX) < 0.1) {
+                    ballX = -25 + Math.random() * 10;
+                    ballY = 12 + Math.random() * 5;
+                    ballZ = -15 + Math.random() * 30;
+                    velX = 0.3 + Math.random() * 0.4;
+                    velZ = 0;
+                    spinX = Math.random() * 0.2;
+                    spinY = Math.random() * 0.2;
+                }
+            }
+
+            // Sync structural 3D primitive mesh positions straight to physics engine tracking loops
+            ball.position.set(ballX, ballY, ballZ);
+
+            // Apply angular velocity to roll and spin the ball mesh asset dynamically
+            ball.rotation.x += spinX;
+            ball.rotation.y += spinY;
+            ball.rotation.z += spinZ;
+
+            // Slowly orbit camera dynamically around the center circle to display multi-angle 3D depth
+            const time = clock.getElapsedTime() * 0.1;
+            camera.position.x = Math.sin(time) * 65;
+            camera.position.z = Math.cos(time) * 65;
+            camera.lookAt(0, 0, 0);
+
+            // Commit calculations to WebGL frameBuffer context
+            renderer.render(scene, camera);
+        }
+
+        // --- 6. HANDLE FIELD-OF-VIEW RESIZING ---
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Initialize execution path
+        stepSimulationFrame();
+    </script>
+</body>
+</html>
